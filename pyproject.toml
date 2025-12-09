@@ -5,7 +5,6 @@ description = "Read-only MCP server for Cisco Firepower Management Center (FMC)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "Leon Breukelman" }]
 keywords = ["mcp", "cisco", "fmc", "firepower", "firewall", "security"]
 classifiers = [
     "Development Status :: 3 - Alpha",
