@@ -1,6 +1,8 @@
 """FastMCP server for Cisco FMC."""
 
+import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -45,10 +47,18 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
             _client = None
 
 
-# Create FastMCP server instance
+# Create FastMCP server instance with HTTP/SSE support
+try:
+    _mcp_port = int(os.environ.get("MCP_PORT", "8080"))
+except ValueError:
+    logger.warning("Invalid MCP_PORT value, using default 8080")
+    _mcp_port = 8080
+
 mcp = FastMCP(
     "fmc-mcp",
     lifespan=lifespan,
+    host=os.environ.get("MCP_HOST", "127.0.0.1"),
+    port=_mcp_port,
 )
 
 
@@ -105,9 +115,25 @@ async def get_deployment_status(device_name: str | None = None) -> str:
 
 
 def main() -> None:
-    """Run the FMC MCP server."""
-    logger.info("FMC MCP Server starting...")
-    mcp.run()
+    """Run the FMC MCP server.
+
+    Set MCP_TRANSPORT=http to run in HTTP/SSE mode (scalable).
+    Default is stdio mode (for Claude Desktop).
+    """
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+
+    if transport == "http":
+        host = os.environ.get("MCP_HOST", "127.0.0.1")
+        try:
+            port = int(os.environ.get("MCP_PORT", "8080"))
+        except ValueError:
+            logger.warning("Invalid MCP_PORT value, using default 8080")
+            port = 8080
+        logger.info(f"FMC MCP Server starting in HTTP mode on {host}:{port}...")
+        asyncio.run(mcp.run_sse_async())
+    else:
+        logger.info("FMC MCP Server starting in stdio mode...")
+        mcp.run()
 
 
 if __name__ == "__main__":
