@@ -78,10 +78,15 @@ FMC_PASSWORD=your_password_here
 | `FMC_VERIFY_SSL` | No | `false` | SSL certificate verification |
 | `FMC_DOMAIN_UUID` | No | auto | Domain UUID (auto-discovered) |
 | `FMC_TIMEOUT` | No | `60` | Request timeout in seconds |
+| `MCP_TRANSPORT` | No | `stdio` | Transport mode: `stdio` or `http` |
+| `MCP_HOST` | No | `127.0.0.1` | HTTP server host (HTTP mode only) |
+| `MCP_PORT` | No | `8080` | HTTP server port (HTTP mode only) |
 
 ## Usage
 
 ### Running the Server
+
+#### stdio Mode (Default - for Claude Desktop)
 
 ```bash
 # Using uv
@@ -90,6 +95,34 @@ uv run python -m fmc_mcp
 # Or using the CLI entry point
 uv run mcp-server-fmc
 ```
+
+#### HTTP/SSE Mode (for Integration Testing)
+
+HTTP/SSE mode enables multiple client connections and integration testing scenarios:
+
+```bash
+# Set environment variable for HTTP mode
+export MCP_TRANSPORT=http
+export MCP_HOST=127.0.0.1  # Optional, defaults to 127.0.0.1
+export MCP_PORT=8080       # Optional, defaults to 8080
+
+# Run the server
+uv run python -m fmc_mcp
+```
+
+Or add to your `.env` file:
+
+```env
+MCP_TRANSPORT=http
+MCP_HOST=127.0.0.1
+MCP_PORT=8080
+```
+
+**Benefits of HTTP/SSE mode:**
+- Multiple concurrent client connections
+- Integration testing with Python MCP clients
+- Health checks and monitoring
+- Standard HTTP debugging tools
 
 ### Testing Connection
 
