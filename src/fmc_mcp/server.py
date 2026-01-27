@@ -109,14 +109,14 @@ async def get_deployment_status(device_name: str | None = None) -> str:
 
 def main() -> None:
     """Run the FMC MCP server.
-    
+
     Set MCP_TRANSPORT=http to run in HTTP/SSE mode (scalable).
     Default is stdio mode (for Claude Desktop).
     """
     import asyncio
-    
+
     transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
-    
+
     if transport == "http":
         host = os.environ.get("MCP_HOST", "127.0.0.1")
         port = int(os.environ.get("MCP_PORT", "8080"))

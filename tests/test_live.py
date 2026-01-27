@@ -6,8 +6,8 @@ import json
 
 async def run_live_tests() -> None:
     """Run comprehensive tests against the FMC sandbox."""
-    from fmc_mcp.client import FMCClient
     from fmc_mcp import resources, tools
+    from fmc_mcp.client import FMCClient
 
     print("=" * 60)
     print("FMC MCP Server - Live Integration Tests")
