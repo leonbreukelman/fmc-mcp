@@ -49,15 +49,17 @@ async def list_devices() -> str:
     # Create a summary for each device
     summary = []
     for device in devices:
-        summary.append({
-            "name": device.get("name"),
-            "id": device.get("id"),
-            "hostName": device.get("hostName"),
-            "type": device.get("type"),
-            "healthStatus": device.get("healthStatus"),
-            "model": device.get("model"),
-            "sw_version": device.get("sw_version"),
-        })
+        summary.append(
+            {
+                "name": device.get("name"),
+                "id": device.get("id"),
+                "hostName": device.get("hostName"),
+                "type": device.get("type"),
+                "healthStatus": device.get("healthStatus"),
+                "model": device.get("model"),
+                "sw_version": device.get("sw_version"),
+            }
+        )
 
     return json.dumps({"devices": summary, "count": len(summary)}, indent=2)
 
@@ -74,13 +76,15 @@ async def list_network_objects() -> str:
     # Create a summary for each object
     summary = []
     for obj in objects:
-        summary.append({
-            "name": obj.get("name"),
-            "id": obj.get("id"),
-            "value": obj.get("value"),
-            "type": obj.get("type"),
-            "description": obj.get("description"),
-        })
+        summary.append(
+            {
+                "name": obj.get("name"),
+                "id": obj.get("id"),
+                "value": obj.get("value"),
+                "type": obj.get("type"),
+                "description": obj.get("description"),
+            }
+        )
 
     return json.dumps({"networkObjects": summary, "count": len(summary)}, indent=2)
 
@@ -96,16 +100,21 @@ async def get_deployment_status() -> str:
 
     summary = []
     for device in deployable:
-        summary.append({
-            "name": device.get("name"),
-            "id": device.get("id"),
-            "type": device.get("type"),
-            "canBeDeployed": device.get("canBeDeployed"),
-            "upToDate": device.get("upToDate"),
-        })
+        summary.append(
+            {
+                "name": device.get("name"),
+                "id": device.get("id"),
+                "type": device.get("type"),
+                "canBeDeployed": device.get("canBeDeployed"),
+                "upToDate": device.get("upToDate"),
+            }
+        )
 
-    return json.dumps({
-        "deployableDevices": summary,
-        "count": len(summary),
-        "hasPendingChanges": len(summary) > 0,
-    }, indent=2)
+    return json.dumps(
+        {
+            "deployableDevices": summary,
+            "count": len(summary),
+            "hasPendingChanges": len(summary) > 0,
+        },
+        indent=2,
+    )

@@ -48,9 +48,7 @@ class FMCSettings(BaseSettings):
             logger.info("  Domain UUID: (auto-discover)")
 
         if not self.fmc_verify_ssl:
-            logger.warning(
-                "SSL verification is DISABLED. This is insecure for production use."
-            )
+            logger.warning("SSL verification is DISABLED. This is insecure for production use.")
 
 
 @lru_cache

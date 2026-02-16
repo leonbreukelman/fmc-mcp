@@ -138,7 +138,9 @@ class FMCClient:
         if self._client is None:
             raise RuntimeError("Client not initialized. Call connect() first.")
 
-        credentials = f"{self.settings.fmc_username}:{self.settings.fmc_password.get_secret_value()}"
+        credentials = (
+            f"{self.settings.fmc_username}:{self.settings.fmc_password.get_secret_value()}"
+        )
         encoded = base64.b64encode(credentials.encode()).decode()
 
         logger.info("Authenticating with FMC at %s", self.settings.fmc_host)
@@ -182,7 +184,9 @@ class FMCClient:
             await self._authenticate()
             return True
 
-        logger.info("Refreshing access token (refresh %d/%d)", self._refresh_count + 1, self._max_refreshes)
+        logger.info(
+            "Refreshing access token (refresh %d/%d)", self._refresh_count + 1, self._max_refreshes
+        )
 
         try:
             headers: dict[str, str] = {}
@@ -354,9 +358,7 @@ class FMCClient:
             return await self.get_all_items(endpoint, expanded=True)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
-                logger.warning(
-                    "Deployment endpoint requires elevated permissions (403 Forbidden)"
-                )
+                logger.warning("Deployment endpoint requires elevated permissions (403 Forbidden)")
                 return []
             raise
 

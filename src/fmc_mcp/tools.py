@@ -39,23 +39,27 @@ async def search_object_by_ip(ip_address: str) -> str:
                 # It's a network/subnet
                 network = ipaddress.ip_network(value, strict=False)
                 if search_ip in network:
-                    matches.append({
-                        "type": "network",
-                        "name": obj.get("name"),
-                        "value": value,
-                        "id": obj.get("id"),
-                        "description": obj.get("description"),
-                    })
+                    matches.append(
+                        {
+                            "type": "network",
+                            "name": obj.get("name"),
+                            "value": value,
+                            "id": obj.get("id"),
+                            "description": obj.get("description"),
+                        }
+                    )
             else:
                 # It's a single IP
                 if ipaddress.ip_address(value) == search_ip:
-                    matches.append({
-                        "type": "network",
-                        "name": obj.get("name"),
-                        "value": value,
-                        "id": obj.get("id"),
-                        "description": obj.get("description"),
-                    })
+                    matches.append(
+                        {
+                            "type": "network",
+                            "name": obj.get("name"),
+                            "value": value,
+                            "id": obj.get("id"),
+                            "description": obj.get("description"),
+                        }
+                    )
         except (ValueError, TypeError):
             continue
 
@@ -64,21 +68,26 @@ async def search_object_by_ip(ip_address: str) -> str:
         value = obj.get("value", "")
         try:
             if ipaddress.ip_address(value) == search_ip:
-                matches.append({
-                    "type": "host",
-                    "name": obj.get("name"),
-                    "value": value,
-                    "id": obj.get("id"),
-                    "description": obj.get("description"),
-                })
+                matches.append(
+                    {
+                        "type": "host",
+                        "name": obj.get("name"),
+                        "value": value,
+                        "id": obj.get("id"),
+                        "description": obj.get("description"),
+                    }
+                )
         except (ValueError, TypeError):
             continue
 
-    return json.dumps({
-        "searchedIP": ip_address,
-        "matches": matches,
-        "count": len(matches),
-    }, indent=2)
+    return json.dumps(
+        {
+            "searchedIP": ip_address,
+            "matches": matches,
+            "count": len(matches),
+        },
+        indent=2,
+    )
 
 
 async def check_deployment_status(device_name: str | None = None) -> str:
@@ -99,20 +108,27 @@ async def check_deployment_status(device_name: str | None = None) -> str:
 
     results = []
     for device in deployable:
-        results.append({
-            "name": device.get("name"),
-            "id": device.get("id"),
-            "canBeDeployed": device.get("canBeDeployed"),
-            "upToDate": device.get("upToDate"),
-            "hasPendingChanges": not device.get("upToDate", True),
-        })
+        results.append(
+            {
+                "name": device.get("name"),
+                "id": device.get("id"),
+                "canBeDeployed": device.get("canBeDeployed"),
+                "upToDate": device.get("upToDate"),
+                "hasPendingChanges": not device.get("upToDate", True),
+            }
+        )
 
     all_synced = all(r.get("upToDate", True) for r in results)
 
-    return json.dumps({
-        "filter": device_name or "all devices",
-        "devices": results,
-        "count": len(results),
-        "allDevicesSynced": all_synced if results else True,
-        "summary": "All devices are in sync" if all_synced else f"{sum(1 for r in results if not r.get('upToDate'))} device(s) have pending changes",
-    }, indent=2)
+    return json.dumps(
+        {
+            "filter": device_name or "all devices",
+            "devices": results,
+            "count": len(results),
+            "allDevicesSynced": all_synced if results else True,
+            "summary": "All devices are in sync"
+            if all_synced
+            else f"{sum(1 for r in results if not r.get('upToDate'))} device(s) have pending changes",
+        },
+        indent=2,
+    )
