@@ -1,6 +1,7 @@
 """Tests for MCP resources and tools."""
 
 import json
+from collections.abc import AsyncGenerator
 
 import pytest
 from pytest_httpx import HTTPXMock
@@ -14,7 +15,7 @@ from fmc_mcp.config import FMCSettings
 async def initialized_client(
     fmc_settings: FMCSettings,
     httpx_mock: HTTPXMock,
-) -> FMCClient:
+) -> AsyncGenerator[FMCClient, None]:
     """Create an initialized FMC client with mocked auth."""
     httpx_mock.add_response(
         method="POST",

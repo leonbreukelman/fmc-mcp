@@ -1,0 +1,44 @@
+schema_version = "goal-config/v1"
+project_id = "fmc-mcp"
+goal = "Improve the read-only Cisco Firepower Management Center MCP server with bounded, verified, single-file changes that preserve local tests, lint, and typing."
+
+[commands]
+test = ["uv", "run", "python", "-m", "pytest", "-q"]
+lint = ["uv", "run", "ruff", "check", "."]
+typecheck = ["uv", "run", "python", "-m", "mypy", "src", "tests"]
+coverage = ["uv", "run", "python", "-m", "pytest", "--cov=src/fmc_mcp", "--cov-report=term-missing", "-q"]
+
+[coverage]
+source = "src/fmc_mcp"
+floor = 80
+
+[paths]
+source_roots = ["src", "tests", "docs"]
+out_of_scope = [
+  ".env",
+  ".venv",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  "__pycache__",
+  "htmlcov",
+  "dist",
+  "build",
+  ".git",
+  ".arena/patches",
+]
+read_only = [
+  "uv.lock",
+]
+
+[diff_caps]
+max_files = 1
+max_lines = 120
+
+[weights]
+coverage_pct = 2.0
+pyright_errors = -5.0
+ruff_violations = -0.75
+cyclomatic_avg = -2.0
+runtime_p95_ms = -1.0
+test_failure_penalty = -1000.0
