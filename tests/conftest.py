@@ -99,14 +99,14 @@ def mock_network_objects(httpx_mock: HTTPXMock) -> None:
                 {
                     "name": "Internal-Network",
                     "id": "net-1",
-                    "value": "10.10.10.0/24",
+                    "value": "192.0.2.0/24",
                     "type": "Network",
                     "description": "Internal network",
                 },
                 {
                     "name": "DMZ-Network",
                     "id": "net-2",
-                    "value": "192.168.1.0/24",
+                    "value": "198.51.100.0/24",
                     "type": "Network",
                     "description": "DMZ network",
                 },
@@ -127,7 +127,7 @@ def mock_host_objects(httpx_mock: HTTPXMock) -> None:
                 {
                     "name": "WebServer",
                     "id": "host-1",
-                    "value": "10.10.10.5",
+                    "value": "192.0.2.5",
                     "type": "Host",
                     "description": "Web server",
                 },

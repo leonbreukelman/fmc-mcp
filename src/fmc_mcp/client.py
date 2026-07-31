@@ -4,6 +4,8 @@ import asyncio
 import base64
 import logging
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -11,6 +13,10 @@ import httpx
 from fmc_mcp.config import FMCSettings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class DeploymentStatusUnavailableError(RuntimeError):
+    """Raised when FMC will not expose deployment status to this account."""
 
 
 class RateLimiter:
@@ -23,6 +29,8 @@ class RateLimiter:
             capacity: Maximum tokens (requests) in bucket
             refill_rate: Tokens added per second
         """
+        if capacity <= 0 or refill_rate <= 0:
+            raise ValueError("Rate limiter capacity and refill rate must be positive")
         self.capacity = capacity
         self.refill_rate = refill_rate
         self.tokens = float(capacity)
@@ -78,6 +86,7 @@ class FMCClient:
         self._domain_uuid: str | None = self.settings.fmc_domain_uuid
         self._refresh_count: int = 0
         self._max_refreshes: int = 3
+        self._refresh_lock = asyncio.Lock()
         self._rate_limiter = RateLimiter(
             capacity=self.settings.fmc_rate_limit,
             refill_rate=self.settings.fmc_rate_limit / 60,
@@ -145,17 +154,17 @@ class FMCClient:
 
         logger.info("Authenticating with FMC at %s", self.settings.fmc_host)
 
-        response = await self._client.post(
+        response = await self._send_request(
+            "POST",
             "/api/fmc_platform/v1/auth/generatetoken",
             headers={"Authorization": f"Basic {encoded}"},
         )
 
         if response.status_code != 204:
-            logger.error("Authentication failed: %d %s", response.status_code, response.text)
+            logger.error("Authentication failed with status %d", response.status_code)
             raise RuntimeError(f"FMC authentication failed: {response.status_code}")
 
-        self._access_token = response.headers.get("X-auth-access-token")
-        self._refresh_token = response.headers.get("X-auth-refresh-token")
+        self._access_token, self._refresh_token = self._extract_auth_tokens(response)
         self._refresh_count = 0
 
         # Extract domain UUID from response if not configured
@@ -167,42 +176,56 @@ class FMCClient:
 
         logger.info("Successfully authenticated with FMC")
 
-    async def _refresh_auth_token(self) -> bool:
+    @staticmethod
+    def _extract_auth_tokens(response: httpx.Response) -> tuple[str, str]:
+        """Read and validate required FMC token headers."""
+        access_token = response.headers.get("X-auth-access-token")
+        refresh_token = response.headers.get("X-auth-refresh-token")
+        if not access_token:
+            raise RuntimeError("FMC authentication response missing access token")
+        if not refresh_token:
+            raise RuntimeError("FMC authentication response missing refresh token")
+        return access_token, refresh_token
+
+    async def _refresh_auth_token(self, stale_access_token: str | None = None) -> bool:
         """Refresh the access token.
 
         Returns:
             True if refresh succeeded, False if re-auth required
         """
-        if self._client is None or not self._refresh_token:
-            return False
+        async with self._refresh_lock:
+            if stale_access_token and self._access_token != stale_access_token:
+                return True
+            if self._client is None or not self._refresh_token:
+                return False
 
-        if self._refresh_count >= self._max_refreshes:
-            logger.warning(
-                "Reached max token refreshes (%d), performing full re-authentication",
+            if self._refresh_count >= self._max_refreshes:
+                logger.warning(
+                    "Reached max token refreshes (%d), performing full re-authentication",
+                    self._max_refreshes,
+                )
+                await self._authenticate()
+                return True
+
+            logger.info(
+                "Refreshing access token (refresh %d/%d)",
+                self._refresh_count + 1,
                 self._max_refreshes,
             )
-            await self._authenticate()
-            return True
 
-        logger.info(
-            "Refreshing access token (refresh %d/%d)", self._refresh_count + 1, self._max_refreshes
-        )
-
-        try:
             headers: dict[str, str] = {}
             if self._access_token:
                 headers["X-auth-access-token"] = self._access_token
-            if self._refresh_token:
-                headers["X-auth-refresh-token"] = self._refresh_token
+            headers["X-auth-refresh-token"] = self._refresh_token
 
-            response = await self._client.post(
+            response = await self._send_request(
+                "POST",
                 "/api/fmc_platform/v1/auth/refreshtoken",
                 headers=headers,
             )
 
             if response.status_code == 204:
-                self._access_token = response.headers.get("X-auth-access-token")
-                self._refresh_token = response.headers.get("X-auth-refresh-token")
+                self._access_token, self._refresh_token = self._extract_auth_tokens(response)
                 self._refresh_count += 1
                 logger.info("Token refreshed successfully")
                 return True
@@ -211,10 +234,36 @@ class FMCClient:
             await self._authenticate()
             return True
 
-        except Exception as e:
-            logger.error("Token refresh error: %s, will re-authenticate", e)
-            await self._authenticate()
-            return True
+    async def _send_request(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send one HTTP attempt under rate and connection limits."""
+        if self._client is None:
+            raise RuntimeError("Client not initialized. Call connect() first.")
+        await self._rate_limiter.acquire()
+        async with self._connection_semaphore:
+            return await self._client.request(method, path, **kwargs)
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> float:
+        """Parse Retry-After delta-seconds or HTTP-date, bounded to five minutes."""
+        if not value:
+            return 60.0
+        try:
+            delay = float(value)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                logger.warning("Invalid Retry-After value; using 60 seconds")
+                return 60.0
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        return min(max(delay, 0.0), 300.0)
 
     async def _request(
         self,
@@ -235,32 +284,33 @@ class FMCClient:
         if self._client is None:
             raise RuntimeError("Client not initialized. Call connect() first.")
 
-        # Apply rate limiting
-        await self._rate_limiter.acquire()
+        access_token = self._access_token
+        if not access_token:
+            raise RuntimeError("FMC client is not authenticated")
+        headers = dict(kwargs.pop("headers", {}))
+        headers["X-auth-access-token"] = access_token
 
-        # Apply connection limiting
-        async with self._connection_semaphore:
-            headers = kwargs.pop("headers", {})
+        response = await self._send_request(method, path, headers=headers, **kwargs)
+
+        # Handle token expiration
+        if response.status_code == 401:
+            logger.info("Received 401, attempting token refresh")
+            if not await self._refresh_auth_token(access_token):
+                await self._authenticate()
+            if not self._access_token:
+                raise RuntimeError("FMC token refresh did not produce an access token")
             headers["X-auth-access-token"] = self._access_token
+            response = await self._send_request(method, path, headers=headers, **kwargs)
 
-            response = await self._client.request(method, path, headers=headers, **kwargs)
+        # Handle rate limiting
+        if response.status_code == 429:
+            logger.error("Rate limited by FMC (429 Too Many Requests)")
+            retry_after = self._retry_after_seconds(response.headers.get("Retry-After"))
+            logger.warning("Rate limited, waiting %.1f seconds", retry_after)
+            await asyncio.sleep(retry_after)
+            response = await self._send_request(method, path, headers=headers, **kwargs)
 
-            # Handle token expiration
-            if response.status_code == 401:
-                logger.info("Received 401, attempting token refresh")
-                await self._refresh_auth_token()
-                headers["X-auth-access-token"] = self._access_token
-                response = await self._client.request(method, path, headers=headers, **kwargs)
-
-            # Handle rate limiting
-            if response.status_code == 429:
-                logger.error("Rate limited by FMC (429 Too Many Requests)")
-                retry_after = int(response.headers.get("Retry-After", "60"))
-                logger.warning("Rate limited, waiting %d seconds", retry_after)
-                await asyncio.sleep(retry_after)
-                response = await self._client.request(method, path, headers=headers, **kwargs)
-
-            return response
+        return response
 
     async def get(self, path: str, **kwargs: Any) -> httpx.Response:
         """Make a GET request."""
@@ -304,21 +354,27 @@ class FMCClient:
 
             all_items.extend(items)
 
-            # Check if we've fetched all items
             paging = data.get("paging", {})
-            total_count = paging.get("count", 0)
+            total_count = paging.get("count")
 
             logger.info(
-                "Fetched %d items (total: %d/%d)",
+                "Fetched %d items (total: %d/%s)",
                 len(items),
                 len(all_items),
-                total_count,
+                total_count if isinstance(total_count, int) else "unknown",
             )
 
-            if offset + limit >= total_count:
+            has_next = bool(paging.get("next"))
+            if (
+                len(items) < limit
+                and not has_next
+                and (not isinstance(total_count, int) or len(all_items) >= total_count)
+            ):
                 break
 
-            offset += limit
+            offset += len(items)
+            if offset <= 0:
+                break
 
         return all_items
 
@@ -359,7 +415,9 @@ class FMCClient:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 403:
                 logger.warning("Deployment endpoint requires elevated permissions (403 Forbidden)")
-                return []
+                raise DeploymentStatusUnavailableError(
+                    "FMC denied access to deployment status"
+                ) from e
             raise
 
     async def test_connection(self) -> None:

@@ -5,27 +5,37 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: tests / lint / typecheck
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
+          version: "0.11.30"
 
       - name: Install dependencies
         run: uv sync --extra dev --frozen
@@ -33,8 +43,67 @@ jobs:
       - name: Run tests
         run: uv run --extra dev python -m pytest -q
 
-      - name: Run ruff
-        run: uv run --extra dev ruff check src/ tests/
+  quality:
+    name: Quality, package, and security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Run mypy
-        run: uv run --extra dev mypy src/
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          version: "0.11.30"
+
+      - name: Install dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Run lint and format checks
+        run: |
+          uv run --extra dev ruff check .
+          uv run --extra dev ruff format --check .
+
+      - name: Run strict type checks
+        run: |
+          uv run --extra dev python -m mypy src tests
+          uv run --extra dev pyright
+
+      - name: Enforce coverage floor
+        run: uv run --extra dev python -m pytest --cov=src/fmc_mcp --cov-report=term-missing --cov-fail-under=80 -q
+
+      - name: Run repository hooks
+        run: uv run --extra dev pre-commit run --all-files
+
+      - name: Build distributions
+        run: uv build --out-dir "$RUNNER_TEMP/dist"
+
+      - name: Install and import the built wheel
+        run: |
+          uv venv --python 3.13 "$RUNNER_TEMP/wheel-venv"
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" "$RUNNER_TEMP"/dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "import fmc_mcp; print(fmc_mcp.__version__)"
+
+      - name: Audit runtime dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file "$RUNNER_TEMP/runtime-requirements.txt"
+          uv run --extra dev pip-audit --requirement "$RUNNER_TEMP/runtime-requirements.txt"
+
+      - name: Smoke MCP registry
+        run: uv run --extra dev python -c "import asyncio; from fmc_mcp.server import mcp; assert asyncio.run(mcp.list_tools()); assert asyncio.run(mcp.list_resources())"
+
+  gate:
+    name: CI gate
+    if: ${{ always() }}
+    needs: [test, quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all CI jobs
+        run: |
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.quality.result }}" = "success"
