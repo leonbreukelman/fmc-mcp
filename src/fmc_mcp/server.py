@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -10,7 +9,7 @@ from mcp.server.fastmcp import FastMCP
 
 from fmc_mcp import resources, tools
 from fmc_mcp.client import FMCClient
-from fmc_mcp.config import get_settings
+from fmc_mcp.config import get_mcp_settings, get_settings
 
 # Configure logging
 logging.basicConfig(
@@ -47,18 +46,14 @@ async def lifespan(server: FastMCP) -> AsyncIterator[None]:
             _client = None
 
 
-# Create FastMCP server instance with HTTP/SSE support
-try:
-    _mcp_port = int(os.environ.get("MCP_PORT", "8080"))
-except ValueError:
-    logger.warning("Invalid MCP_PORT value, using default 8080")
-    _mcp_port = 8080
+# Create FastMCP server instance with validated HTTP/SSE settings
+_mcp_settings = get_mcp_settings()
 
 mcp = FastMCP(
     "fmc-mcp",
     lifespan=lifespan,
-    host=os.environ.get("MCP_HOST", "127.0.0.1"),
-    port=_mcp_port,
+    host=_mcp_settings.mcp_host,
+    port=_mcp_settings.mcp_port,
 )
 
 
@@ -93,7 +88,7 @@ async def search_object_by_ip(ip_address: str) -> str:
     """Find network objects containing a specific IP address.
 
     Args:
-        ip_address: The IP address to search for (e.g., "10.10.10.5")
+        ip_address: The IP address to search for (e.g., "192.0.2.5")
 
     Returns:
         JSON with matching network and host objects
@@ -120,16 +115,14 @@ def main() -> None:
     Set MCP_TRANSPORT=http to run in HTTP/SSE mode (scalable).
     Default is stdio mode (for Claude Desktop).
     """
-    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    settings = get_mcp_settings()
 
-    if transport == "http":
-        host = os.environ.get("MCP_HOST", "127.0.0.1")
-        try:
-            port = int(os.environ.get("MCP_PORT", "8080"))
-        except ValueError:
-            logger.warning("Invalid MCP_PORT value, using default 8080")
-            port = 8080
-        logger.info(f"FMC MCP Server starting in HTTP mode on {host}:{port}...")
+    if settings.mcp_transport == "http":
+        logger.info(
+            "FMC MCP Server starting in HTTP mode on %s:%d...",
+            settings.mcp_host,
+            settings.mcp_port,
+        )
         asyncio.run(mcp.run_sse_async())
     else:
         logger.info("FMC MCP Server starting in stdio mode...")

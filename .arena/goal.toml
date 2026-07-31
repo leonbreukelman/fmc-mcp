@@ -3,10 +3,10 @@ project_id = "fmc-mcp"
 goal = "Improve the read-only Cisco Firepower Management Center MCP server with bounded, verified, single-file changes that preserve local tests, lint, and typing."
 
 [commands]
-test = ["uv", "run", "python", "-m", "pytest", "-q"]
-lint = ["uv", "run", "ruff", "check", "."]
-typecheck = ["uv", "run", "python", "-m", "mypy", "src", "tests"]
-coverage = ["uv", "run", "python", "-m", "pytest", "--cov=src/fmc_mcp", "--cov-report=term-missing", "-q"]
+test = ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "-q"]
+lint = ["uv", "run", "--extra", "dev", "ruff", "check", "."]
+typecheck = ["uv", "run", "--extra", "dev", "pyright", "--outputjson"]
+coverage = ["uv", "run", "--extra", "dev", "python", "-m", "pytest", "--cov=src/fmc_mcp", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
 
 [coverage]
 source = "src/fmc_mcp"
@@ -36,6 +36,7 @@ max_files = 1
 max_lines = 120
 
 [weights]
+# Build Arena's stable scorer axis is named pyright_errors.
 coverage_pct = 2.0
 pyright_errors = -5.0
 ruff_violations = -0.75

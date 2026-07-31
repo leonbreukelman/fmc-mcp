@@ -4,6 +4,7 @@ import ipaddress
 import json
 import logging
 
+from fmc_mcp.client import DeploymentStatusUnavailableError
 from fmc_mcp.resources import get_client
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ async def search_object_by_ip(ip_address: str) -> str:
     """Find network objects containing the specified IP address.
 
     Args:
-        ip_address: IP address to search for (e.g., "10.10.10.5")
+        ip_address: IP address to search for (e.g., "192.0.2.5")
 
     Returns:
         JSON string with matching objects
@@ -100,11 +101,56 @@ async def check_deployment_status(device_name: str | None = None) -> str:
         JSON string with deployment status
     """
     client = get_client()
-    deployable = await client.get_deployable_devices()
+    try:
+        deployable = await client.get_deployable_devices()
+    except DeploymentStatusUnavailableError:
+        return json.dumps(
+            {
+                "status": "unavailable",
+                "reason": "permission_denied",
+                "filter": device_name or "all devices",
+                "devices": [],
+                "count": 0,
+                "allDevicesSynced": None,
+                "summary": "Deployment status unavailable: FMC denied access",
+            },
+            indent=2,
+        )
 
     if device_name:
-        # Filter to specific device
-        deployable = [d for d in deployable if d.get("name", "").lower() == device_name.lower()]
+        devices = await client.get_devices()
+        matching_devices = [
+            device
+            for device in devices
+            if device.get("name", "").casefold() == device_name.casefold()
+        ]
+        if not matching_devices:
+            return json.dumps(
+                {
+                    "status": "not_found",
+                    "filter": device_name,
+                    "devices": [],
+                    "count": 0,
+                    "allDevicesSynced": None,
+                    "summary": f"Device not found: {device_name}",
+                },
+                indent=2,
+            )
+
+        pending_by_id = {device.get("id"): device for device in deployable}
+        deployable = []
+        for device in matching_devices:
+            pending = pending_by_id.get(device.get("id"))
+            if pending:
+                deployable.append(pending)
+            else:
+                deployable.append(
+                    {
+                        **device,
+                        "canBeDeployed": False,
+                        "upToDate": True,
+                    }
+                )
 
     results = []
     for device in deployable:
@@ -122,6 +168,7 @@ async def check_deployment_status(device_name: str | None = None) -> str:
 
     return json.dumps(
         {
+            "status": "ok",
             "filter": device_name or "all devices",
             "devices": results,
             "count": len(results),

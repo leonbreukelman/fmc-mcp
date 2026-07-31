@@ -1,10 +1,26 @@
 """Tests for FMC client."""
 
+import asyncio
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from unittest.mock import AsyncMock
+
 import pytest
 from pytest_httpx import HTTPXMock
 
 from fmc_mcp.client import FMCClient, RateLimiter
 from fmc_mcp.config import FMCSettings
+
+
+class CountingLimiter(RateLimiter):
+    """Minimal rate-limiter spy."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    async def acquire(self) -> None:
+        """Record an attempted HTTP request."""
+        self.count += 1
 
 
 class TestRateLimiter:
@@ -24,6 +40,15 @@ class TestRateLimiter:
         for _ in range(3):
             await limiter.acquire()
         assert limiter.tokens < 3
+
+    @pytest.mark.parametrize(
+        ("capacity", "refill_rate"),
+        [(0, 1.0), (-1, 1.0), (1, 0.0), (1, -1.0)],
+    )
+    def test_rejects_non_positive_limits(self, capacity: int, refill_rate: float) -> None:
+        """A limiter must never accept values that can deadlock or divide by zero."""
+        with pytest.raises(ValueError, match="positive"):
+            RateLimiter(capacity=capacity, refill_rate=refill_rate)
 
 
 class TestFMCClient:
@@ -60,6 +85,39 @@ class TestFMCClient:
         await fmc_client.connect()
         assert fmc_client._access_token == "test-access-token"
         assert fmc_client._refresh_token == "test-refresh-token"
+        await fmc_client.close()
+
+    @pytest.mark.asyncio
+    async def test_authentication_consumes_rate_limit_capacity(
+        self,
+        fmc_client: FMCClient,
+        mock_auth_response: None,
+    ) -> None:
+        """Authentication is an FMC API request and must be rate limited."""
+        limiter = CountingLimiter()
+        fmc_client._rate_limiter = limiter
+
+        await fmc_client.connect()
+
+        assert limiter.count == 1
+        await fmc_client.close()
+
+    @pytest.mark.asyncio
+    async def test_authentication_rejects_missing_access_token(
+        self,
+        fmc_client: FMCClient,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """A nominal 204 response without an access token is not authenticated."""
+        httpx_mock.add_response(
+            method="POST",
+            url="https://fmc.test.local/api/fmc_platform/v1/auth/generatetoken",
+            status_code=204,
+            headers={"X-auth-refresh-token": "refresh-token"},
+        )
+
+        with pytest.raises(RuntimeError, match="access token"):
+            await fmc_client.connect()
         await fmc_client.close()
 
     @pytest.mark.asyncio
@@ -149,6 +207,118 @@ class TestFMCClient:
             assert version["serverVersion"] == "7.4.2.3"
             assert fmc_client._access_token == "new-token"
             assert fmc_client._refresh_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_rejects_missing_access_token(
+        self,
+        fmc_client: FMCClient,
+        mock_auth_response: None,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """Refresh must not replace a valid token with a missing header."""
+        await fmc_client.connect()
+        httpx_mock.add_response(
+            method="POST",
+            url="https://fmc.test.local/api/fmc_platform/v1/auth/refreshtoken",
+            status_code=204,
+            headers={"X-auth-refresh-token": "new-refresh-token"},
+        )
+
+        with pytest.raises(RuntimeError, match="access token"):
+            await fmc_client._refresh_auth_token()
+        await fmc_client.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_refreshes_are_coalesced(
+        self,
+        fmc_client: FMCClient,
+        mock_auth_response: None,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """Concurrent 401 handlers must perform one refresh for the stale token."""
+        await fmc_client.connect()
+        httpx_mock.add_response(
+            method="POST",
+            url="https://fmc.test.local/api/fmc_platform/v1/auth/refreshtoken",
+            status_code=204,
+            headers={
+                "X-auth-access-token": "new-token",
+                "X-auth-refresh-token": "new-refresh-token",
+            },
+        )
+
+        results = await asyncio.gather(
+            fmc_client._refresh_auth_token("test-access-token"),
+            fmc_client._refresh_auth_token("test-access-token"),
+        )
+
+        assert len(results) == 2
+        assert all(results)
+        assert fmc_client._refresh_count == 1
+        await fmc_client.close()
+
+    @pytest.mark.asyncio
+    async def test_retry_attempt_is_rate_limited_and_accepts_http_date(
+        self,
+        fmc_client: FMCClient,
+        mock_auth_response: None,
+        httpx_mock: HTTPXMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Every 429 retry is counted and RFC date-form Retry-After is supported."""
+        await fmc_client.connect()
+        limiter = CountingLimiter()
+        fmc_client._rate_limiter = limiter
+        retry_at = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=5), usegmt=True)
+        httpx_mock.add_response(
+            method="GET",
+            url="https://fmc.test.local/api/fmc_platform/v1/info/serverversion",
+            status_code=429,
+            headers={"Retry-After": retry_at},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url="https://fmc.test.local/api/fmc_platform/v1/info/serverversion",
+            json={"serverVersion": "7.4.2.3"},
+        )
+        sleep = AsyncMock()
+        monkeypatch.setattr(asyncio, "sleep", sleep)
+
+        version = await fmc_client.get_server_version()
+
+        assert version["serverVersion"] == "7.4.2.3"
+        assert limiter.count == 2
+        sleep.assert_awaited_once()
+        assert sleep.await_args is not None
+        assert 0 <= sleep.await_args.args[0] <= 5
+        await fmc_client.close()
+
+    @pytest.mark.asyncio
+    async def test_pagination_continues_without_reliable_count(
+        self,
+        fmc_client: FMCClient,
+        mock_auth_response: None,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        """A full page must not be treated as final when paging.count is absent."""
+        await fmc_client.connect()
+        first_page = [{"id": f"item-{index}"} for index in range(1000)]
+        httpx_mock.add_response(
+            method="GET",
+            url="https://fmc.test.local/items?limit=1000&offset=0&expanded=true",
+            json={"items": first_page, "paging": {"next": "/items?offset=1000"}},
+        )
+        httpx_mock.add_response(
+            method="GET",
+            url="https://fmc.test.local/items?limit=1000&offset=1000&expanded=true",
+            json={"items": [{"id": "item-1000"}], "paging": {}},
+        )
+
+        items = await fmc_client.get_all_items("/items")
+
+        assert len(items) == 1001
+        assert items[-1]["id"] == "item-1000"
+        await fmc_client.close()
 
     @pytest.mark.asyncio
     async def test_context_manager(

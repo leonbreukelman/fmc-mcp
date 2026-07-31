@@ -1,213 +1,92 @@
-This is a strategic pivot. Starting with a **Read-Only MVP (Minimum Viable Product)** is the correct engineering approach. It isolates the most fragile components—Authentication, Rate Limiting, and Pagination—without the risk of accidentally breaking network configurations.
+# Cisco FMC read-only MCP server design
 
-Below is the **Technical Design Document** for the Read-Only FMC MCP Server. I have incorporated the specific feedback you provided, particularly regarding connection concurrency and the specific limits of the bulk/pagination APIs.
+Status: implemented baseline
+Last updated: 2026-07-30
 
-### **Technical Design Document: Cisco FMC Read-Only MCP Server (MVP)**
+## Purpose
 
-#### **1. MVP Objectives & Scope**
+Expose Cisco Firepower Management Center inventory and deployment context through MCP without changing FMC configuration or device state.
 
-* **Goal:** Establish a stable, self-healing connection to FMC and expose network configuration context to the LLM.
-* **Scope:** **READ-ONLY**. No configuration changes (`POST`, `PUT`, `DELETE` are disabled).
-* **Success Criteria:**
-    1. Server authenticates and stays connected for \>2 hours (handling the 3-refresh hard stop).
-    2. Respects the 120 req/min AND **10 concurrent connection** limits.
-    3. Successfully pages through \>1,000 network objects without timing out.
-    4. Exposes devices and objects as MCP Resources.
+The data plane is read-only. It performs GET requests for version, device, object, and deployment data. Authentication uses FMC's required token-generation and token-refresh POST endpoints; those calls do not mutate firewall configuration.
 
------
+## Supported runtime
 
-#### **2. Revised Constraints & Resiliency Strategy**
+- Python 3.10–3.13
+- MCP Python SDK 1.28.1 through the latest compatible 1.x release
+- Cisco FMC 7.4.x
+- stdio transport by default; HTTP/SSE is opt-in
 
-Based on the feedback, we are refining the transport layer constraints.
+MCP 2.x is deliberately excluded until a separate API migration is implemented and tested.
 
-| Constraint | Value | Architectural Solution |
-| :--- | :--- | :--- |
-| **Rate Limit** | 120 req/min | Token Bucket Limiter (Capacity: 120, Refill: 2/sec). |
-| **Concurrency** | **10 connections** | \*\*\*\* `httpx.Limits(max_connections=10)` to prevent socket exhaustion. |
-| **Token Life** | 30 mins | Auto-refresh on `401 Unauthorized`. |
-| **Hard Stop** | 3 Refreshes | \*\*\*\* Force full re-login (Basic Auth) after 3 refreshes. |
-| **Payload** | \~2MB (Bulk) | *Not applicable for Read-Only writes*, but relevant for large JSON responses. |
-| **Pagination** | Max 1000 items | Recursive fetch logic using `offset` and `limit`. |
+## Components
 
------
+| Component | Responsibility |
+| --- | --- |
+| `src/fmc_mcp/config.py` | Validate FMC credentials, operational limits, and MCP listener settings. |
+| `src/fmc_mcp/client.py` | Authenticate, rate-limit every HTTP attempt, bound concurrency, refresh tokens, parse retries, and paginate. |
+| `src/fmc_mcp/resources.py` | Format passive MCP resources. |
+| `src/fmc_mcp/tools.py` | Execute read-only IP search and deployment-status queries. |
+| `src/fmc_mcp/server.py` | Register MCP resources/tools and manage the FMC client lifecycle. |
 
-#### **3. Authentication & Transport Architecture**
+## MCP surface
 
-This is the "Engine Room" of the server. It must be decoupled from the MCP logic.
+### Resources
 
-**Component:** `FMCClient` (Singleton)
-**Library:** `httpx` (Async)
+| URI | Result |
+| --- | --- |
+| `fmc://system/info` | FMC server version and platform information. |
+| `fmc://devices/list` | Managed firewall device summaries. |
+| `fmc://objects/network` | Network object summaries. |
+| `fmc://deployment/status` | Pending deployment data or an explicit unavailable state. |
 
-**The "Hard Stop" Handling Logic:**
-The standard OAuth "refresh loop" is insufficient here. We implement a **Generational Session Manager**.
+### Tools
 
-```mermaid
-graph TD
-    A --> B{Token Valid?}
-    B -- Yes --> C
-    B -- No --> D
-    
-    D -- Count < 3 --> E[Call /api/.../refreshtoken]
-    E --> F{Success?}
-    F -- Yes --> G --> C
-    F -- No --> H
-    
-    D -- Count >= 3 --> H
-    H -- Basic Auth --> I[Call /generatetoken]
-    I --> J --> C
-```
+| Tool | Result |
+| --- | --- |
+| `search_object_by_ip` | Network and host objects containing an IPv4 or IPv6 address. |
+| `get_deployment_status` | Pending state for all devices or one validated device name. |
 
-**Configuration Implementation (Python):**
+## Authentication and retry contract
 
-```python
-import httpx
+1. Generate an access and refresh token with FMC Basic Auth.
+2. Reject a nominal success response if either required token header is missing.
+3. Send the access token on every data request.
+4. On 401, serialize refresh under a lock. Concurrent requests that failed with the same stale token share one refresh.
+5. After three refreshes, perform a full token generation request.
+6. On 429, honor delta-seconds or HTTP-date `Retry-After`; invalid values use 60 seconds and any wait is capped at five minutes.
+7. Every authentication, data, and retry attempt consumes one rate-limit token and one connection slot.
 
-# Enforcing the 10-connection limit from feedback
-limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+## Rate and connection limits
 
-client = httpx.AsyncClient(
-    base_url=f"https://{FMC_HOST}",
-    verify=SSL_VERIFY,
-    limits=limits,  # Critical fix based on feedback
-    timeout=60.0    # Increased timeout for large paginated reads
-)
-```
+Defaults match the project FMC contract:
 
------
+- 120 HTTP attempts per minute, implemented as a token bucket with a two-token-per-second refill.
+- 10 concurrent HTTP attempts, enforced by both the client connection pool and an asyncio semaphore.
+- 60-second request timeout.
 
-#### **4. MCP Resource Mapping (Read-Only)**
+Non-positive values fail configuration validation before runtime primitives are constructed.
 
-We will strictly use **Resources** for fetching lists and configurations. This allows the LLM to "read" the firewall config like a file.
+## Pagination contract
 
-**URI Scheme:** `fmc://{domain_name}/{resource_type}/{identifier}`
+List endpoints request up to 1,000 expanded items at a time. The client continues when the response supplies `paging.next`, when a full page is returned, or when a reported total indicates more items. It stops on an empty page or a short final page. `paging.count` is advisory rather than the sole completion signal.
 
-| Resource URI | Description | FMC API Endpoint | Why? |
-| :--- | :--- | :--- | :--- |
-| `fmc://system/info` | Server version & health | `/api/fmc_platform/v1/info/serverversion` | "Hello World" sanity check. |
-| `fmc://devices/list` | Summary of all firewalls | `/api/fmc_config/v1/domain/{uuid}/devices/devicerecords` | Context grounding. |
-| `fmc://device/{name}/interfaces` | Interface IPs & Status | `.../devices/devicerecords/{uuid}/physicalinterfaces` | Troubleshooting context. |
-| `fmc://objects/network` | **ALL** Network Objects | `/api/fmc_config/v1/domain/{uuid}/object/networks` | The "Phonebook" of the network. |
-| `fmc://objects/ports` | **ALL** Port Objects | `/api/fmc_config/v1/domain/{uuid}/object/ports` | Service definitions. |
+## Deployment-status semantics
 
-**The Pagination Problem (Feedback Integration):**
-The feedback correctly noted that simple GETs fail on large datasets. The `objects/network` resource must implement **transparent pagination**.
+- `status: "ok"`: FMC returned deployment data.
+- `status: "unavailable", reason: "permission_denied"`: FMC returned 403. Synchronization fields are unknown, not successful.
+- `status: "not_found"`: a requested device name does not exist in the managed-device inventory. Synchronization is unknown.
+- A known device absent from the deployable list is reported as synchronized.
 
-**Logic for `fmc://objects/network`:**
+## Security boundary
 
-1. Resource handler is called.
-2. `FMCClient` calls API with `limit=1000&offset=0`.
-3. If `paging.pages > 1`, `FMCClient` enters a `while` loop.
-4. Increment offset by 1000.
-5. Accumulate results.
-6. Return **one merged JSON blob** to the LLM.
-      * *Note:* If the dataset is huge (\>5MB), we may need to truncate or summarize, but for an MVP, fetching all is the best stress test.
+- Credentials are loaded from environment variables or an ignored `.env` file and are never logged.
+- Authentication errors log status codes, not response bodies.
+- TLS verification remains disabled by default for backwards-compatible lab use. Production deployments must set `FMC_VERIFY_SSL=true` and use a trusted certificate.
+- HTTP transport binds to loopback by default. Operators must add their own network access controls before binding more broadly.
+- Vulnerability reports follow `SECURITY.md`.
 
------
+## Verification contract
 
-#### **5. MCP Tools (Read-Only Queries)**
+The deterministic gate covers unit tests, branch coverage of at least 80%, Ruff, strict mypy, Pyright-compatible Build Arena scoring, pre-commit, package build, clean wheel installation/import, runtime dependency audit, MCP registry smoke, Python 3.10–3.13 CI, and CodeQL.
 
-While Resources are passive, Tools allow specific lookups. We will implement **two** tools to verify the "Search" capability without writing changes.
-
-1. **`search_object_by_ip`**
-
-      * **Goal:** "What object is 10.10.10.5?"
-      * **Logic:** Fetches network objects (cached if possible) and filters Python-side (since FMC API filtering is limited) or uses the `?filter=value:10.10.10.5` query param if supported by the specific version.
-
-2. **`get_deployment_status`**
-
-      * **Goal:** "Is the firewall syncing?"
-      * **Logic:** Queries `/api/fmc_config/v1/domain/{uuid}/deployment/deployabledevices`. Useful to see if the device is dirty (needs deployment).
-
------
-
-#### **6. Project Structure (MVP)**
-
-We will keep the structure flat and simple for the MVP.
-
-fmc-mcp-read-only/
-├──.env                    \# Credentials (Host, User, Pass)
-├── pyproject.toml          \# Deps: mcp, httpx, pydantic, python-dotenv
-├── src/
-│   ├── **init**.py
-│   ├── main.py             \# Entry point, MCP Server definition
-│   ├── config.py           \# Env loading & Validation
-│   ├── fmc.py              \# FMCClient class (Auth, RateLimit, Pagination)
-│   └── utils.py            \# JSON formatting helpers
-└── README.md
-
------
-
-#### **7. Implementation Plan (Step-by-Step)**
-
-**Step 1: The Skeleton (Transport)**
-
-* Create `fmc.py`.
-* Implement `connect()` using `httpx`.
-* Implement `_authenticate()` with the `generatetoken` endpoint.
-* **Test:** Run a script that authenticates and prints the Token UUID.
-
-**Step 2: The "Keep-Alive" Logic**
-
-* Add the `refreshtoken` logic.
-* Write a loop that makes a call every 10 seconds for 10 minutes to verify token stability.
-
-**Step 3: The First Resource (System Info)**
-
-* Setup `FastMCP` in `main.py`.
-* Expose `fmc://system/info`.
-* **Test:** Use **Claude Desktop** or **MCP Inspector** to read the resource.
-
-**Step 4: The Heavy Lift (Pagination)**
-
-* Implement `get_objects(type='networks')` in `fmc.py`.
-* Add the logic to loop `offset += 1000` until `items` is empty.
-* Expose `fmc://objects/network`.
-* **Test:** Ensure it returns *all* objects, not just the first 25.
-
-**Step 5: Security & Cleanup**
-
-* Add the `FMC_VERIFY_SSL=False` warning logger.
-* Ensure the session closes cleanly on exit.
-
-### **Refined Code Snippet: The Pagination Logic**
-
-This specific piece of code addresses the pagination feedback directly.
-
-```python
-# src/fmc.py
-
-async def get_all_items(self, endpoint: str):
-    """
-    Transparently handles pagination for FMC APIs.
-    Fetches 1000 items at a time (bulk read limit).
-    """
-    all_items =
-    limit = 1000
-    offset = 0
-    
-    while True:
-        # Construct URL with pagination params
-        # Note: 'expanded=true' gives us the details we need for context
-        params = {"limit": limit, "offset": offset, "expanded": "true"}
-        
-        response = await self.client.get(endpoint, params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        items = data.get("items",)
-        if not items:
-            break
-            
-        all_items.extend(items)
-        
-        # Check if we have reached the end
-        paging = data.get("paging", {})
-        if offset + limit >= paging.get("count", 0):
-            break
-            
-        offset += limit
-        
-    return all_items
-```
-
-This design provides a simplified, highly robust foundation. Once this MVP is working, adding "Write" capabilities is simply a matter of adding new Tools that utilize this existing, stable connection layer.
+The real-appliance boundary is separate: `FMC_LIVE_TEST=1` enables a read-only smoke that hard-fails required version, device, network, host, resource, and tool paths. It requires an authorized sandbox credential set and is not implied by ordinary CI.

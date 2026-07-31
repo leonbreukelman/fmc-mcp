@@ -4,6 +4,8 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
+from fmc_mcp.client import DeploymentStatusUnavailableError
+
 if TYPE_CHECKING:
     from fmc_mcp.client import FMCClient
 
@@ -96,7 +98,19 @@ async def get_deployment_status() -> str:
         JSON string with deployment status
     """
     client = get_client()
-    deployable = await client.get_deployable_devices()
+    try:
+        deployable = await client.get_deployable_devices()
+    except DeploymentStatusUnavailableError:
+        return json.dumps(
+            {
+                "status": "unavailable",
+                "reason": "permission_denied",
+                "deployableDevices": [],
+                "count": 0,
+                "hasPendingChanges": None,
+            },
+            indent=2,
+        )
 
     summary = []
     for device in deployable:
@@ -112,6 +126,7 @@ async def get_deployment_status() -> str:
 
     return json.dumps(
         {
+            "status": "ok",
             "deployableDevices": summary,
             "count": len(summary),
             "hasPendingChanges": len(summary) > 0,
